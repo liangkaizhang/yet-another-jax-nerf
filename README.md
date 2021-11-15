@@ -1,3 +1,2 @@
 # yet-another-jax-nerf
-
-Test
+Yet Another JAX NeRF
