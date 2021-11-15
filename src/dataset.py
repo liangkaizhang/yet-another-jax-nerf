@@ -16,7 +16,7 @@ class DatasetConfig:
     sample_per_image: int
     batch_size: int
     batch_single_image: bool = True
-    is_training = False
+    is_training: bool = False
     prefetch_size = 100
     float_image: bool = True
     use_pixel_centers = True
@@ -25,7 +25,6 @@ class DatasetConfig:
 
 class DatasetBuilder(object):
     """Input dataset."""
-
     def __init__(self, config: DatasetConfig):
         self._config = config
         self._cameras_meta, self._images_meta, _ = read_model(self._config.model_dir, ext=".bin")
@@ -35,10 +34,11 @@ class DatasetBuilder(object):
             self._parse_dataset,
             {"origins": tf.float32, "directions": tf.float32, "pixels": tf.float32},
         )
+        ds = ds.unbatch()
         if self._config.is_training:
-            ds = ds.shuffle(1000, reshuffle_each_iteration=True).repeat()
-        ds = ds.prefetch(self._config.prefetch_size)
+            ds = ds.shuffle(buffer_size=3).repeat()
         ds = ds.batch(self._config.batch_size)
+        ds = ds.prefetch(1)
         return ds
 
     def _parse_dataset(self):
@@ -64,7 +64,6 @@ class DatasetBuilder(object):
             directions = tf.convert_to_tensor(rays.directions, dtype=tf.float32)
             yield {"origins": origins, "directions": directions, "pixels": pixels}
 
-
     def _sample_pixels(self, image: tf.Tensor,
                        height: tf.int32, width: tf.int32) -> Tuple[tf.Tensor, tf.Tensor]:
         """Random sample N pixel values and locations from input image."""
@@ -74,11 +73,11 @@ class DatasetBuilder(object):
         pixels = tf.gather(image, ridxs)
         locations = tf.unravel_index(
             indices=ridxs, dims=[height, width])
-        return pixels.T, locations.T
+        return pixels, locations
     
     def _generate_rays(self, locations: tf.Tensor, camera: Camera) -> Rays:
         """Generate rays emitting from pixel locations."""
         pixel_center = 0.5 if self._config.use_pixel_centers else 0.0
-        x = tf.cast(locations[..., 1], tf.float32) + pixel_center
-        y = tf.cast(locations[..., 0], tf.float32) + pixel_center
+        x = tf.cast(locations[1, ...], tf.float32) + pixel_center
+        y = tf.cast(locations[0, ...], tf.float32) + pixel_center
         return camera.to_world_rays(x, y)
