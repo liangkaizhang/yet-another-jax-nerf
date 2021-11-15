@@ -30,7 +30,7 @@ class DatasetBuilder(object):
         self._config = config
         self._cameras_meta, self._images_meta, _ = read_model(self._config.model_dir, ext=".bin")
     
-    def build_dataset(self) -> tf.data.Dataset:
+    def build(self) -> tf.data.Dataset:
         ds = tf.data.Dataset.from_generator(
             self._parse_dataset,
             {"origins": tf.float32, "directions": tf.float32, "pixels": tf.float32},
