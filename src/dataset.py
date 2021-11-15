@@ -1,3 +1,4 @@
+import threading
 from typing import Callable, Dict, List, Tuple
 import attr
 import os
@@ -13,11 +14,11 @@ class DatasetConfig:
     """Dataset configuration class."""
     model_dir: str
     images_dir: str
-    sample_per_image: int
     batch_size: int
+    batch_per_image: int = 4
     batch_single_image: bool = True
     is_training: bool = False
-    prefetch_size = 100
+    prefetch_size = 3
     float_image: bool = True
     use_pixel_centers = True
     use_ndc: bool = True
@@ -34,11 +35,14 @@ class DatasetBuilder(object):
             self._parse_dataset,
             {"origins": tf.float32, "directions": tf.float32, "pixels": tf.float32},
         )
+        if self._config.is_training:
+            ds = ds.shuffle(buffer_size=10)
         ds = ds.unbatch()
         if self._config.is_training:
-            ds = ds.shuffle(buffer_size=3).repeat()
+            sample_per_image = self._config.batch_per_image * self._config.batch_size
+            ds = ds.shuffle(buffer_size=sample_per_image * 2).repeat()
         ds = ds.batch(self._config.batch_size)
-        ds = ds.prefetch(1)
+        ds = ds.prefetch(self._config.prefetch_size)
         return ds
 
     def _parse_dataset(self):
@@ -69,7 +73,8 @@ class DatasetBuilder(object):
         """Random sample N pixel values and locations from input image."""
         image = tf.reshape(image, [-1 ,3])
         idxs = tf.range(tf.shape(image)[0])
-        ridxs = tf.random.shuffle(idxs)[:int(self._config.sample_per_image)]
+        sample_per_image = self._config.batch_per_image * self._config.batch_size
+        ridxs = tf.random.shuffle(idxs)[:sample_per_image]
         pixels = tf.gather(image, ridxs)
         locations = tf.unravel_index(
             indices=ridxs, dims=[height, width])
