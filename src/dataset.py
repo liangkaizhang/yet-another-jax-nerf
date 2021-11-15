@@ -17,6 +17,7 @@ class DatasetConfig:
     batch_size: int
     batch_single_image: bool = True
     is_training = False
+    prefetch_size = 100
     float_image: bool = True
     use_pixel_centers = True
     use_ndc: bool = True
@@ -36,6 +37,8 @@ class DatasetBuilder(object):
         )
         if self._config.is_training:
             ds = ds.shuffle(1000, reshuffle_each_iteration=True).repeat()
+        ds = ds.prefetch(self._config.prefetch_size)
+        ds = ds.batch(self._config.batch_size)
         return ds
 
     def _parse_dataset(self):
