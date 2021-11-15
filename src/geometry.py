@@ -11,6 +11,10 @@ class Rays:
     directions: np.ndarray
 
 
+def _normalize(x):
+    norm = np.atleast_1d(np.linalg.norm(x, axis=-1))
+    return x / np.expand_dims(norm + 1e-5, -1)
+
 class Camera(object):
 
     def __init__(self,
@@ -31,7 +35,7 @@ class Camera(object):
         xn = (x - self._cx) / self._fx
         yn = (y - self._cy) / self._fy
         zn = np.ones_like(xn)
-        directions = np.stack((xn, yn, zn), axis=-1)
+        directions = _normalize(np.stack((xn, yn, zn), axis=-1))
         origins = np.zeros_like(directions)
         return Rays(origins, directions)
 

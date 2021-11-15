@@ -32,20 +32,13 @@ class DatasetBuilder(object):
     def build_dataset(self) -> tf.data.Dataset:
         ds = tf.data.Dataset.from_generator(
             self._parse_dataset,
-            output_signature=(
-                tf.RaggedTensorSpec(shape=(2, None), dtype=tf.float32),
-                tf.RaggedTensorSpec(shape=(2, None), dtype=tf.float32),
-                tf.RaggedTensorSpec(shape=(2, None), dtype=tf.float32),
-            )
+            {"origins": tf.float32, "directions": tf.float32, "pixels": tf.float32},
         )
         if self._config.is_training:
             ds = ds.shuffle(1000, reshuffle_each_iteration=True).repeat()
         return ds
 
     def _parse_dataset(self):
-        pixels = []
-        ray_origins = []
-        ray_directions = []
         for image_id, image in self._images_meta.items():
             # Parse image.
             image_meta = self._images_meta[image_id]
@@ -64,7 +57,9 @@ class DatasetBuilder(object):
             width = camera_meta.width
             pixels, locations = self._sample_pixels(image, height, width)
             rays = self._generate_rays(locations, camera)
-            yield rays.origins, rays.directions, pixels
+            origins = tf.convert_to_tensor(rays.origins, dtype=tf.float32)
+            directions = tf.convert_to_tensor(rays.directions, dtype=tf.float32)
+            yield {"origins": origins, "directions": directions, "pixels": pixels}
 
 
     def _sample_pixels(self, image: tf.Tensor,
@@ -72,15 +67,15 @@ class DatasetBuilder(object):
         """Random sample N pixel values and locations from input image."""
         image = tf.reshape(image, [-1 ,3])
         idxs = tf.range(tf.shape(image)[0])
-        ridxs = tf.random.shuffle(idxs)[:self._config.sample_per_image]
+        ridxs = tf.random.shuffle(idxs)[:int(self._config.sample_per_image)]
         pixels = tf.gather(image, ridxs)
         locations = tf.unravel_index(
             indices=ridxs, dims=[height, width])
-        return pixels, tf.transpose(locations)
+        return pixels.T, locations.T
     
     def _generate_rays(self, locations: tf.Tensor, camera: Camera) -> Rays:
         """Generate rays emitting from pixel locations."""
         pixel_center = 0.5 if self._config.use_pixel_centers else 0.0
-        x = tf.cast(locations[..., 0], tf.float32) + pixel_center
-        y = tf.cast(locations[..., 1], tf.float32) + pixel_center
+        x = tf.cast(locations[..., 1], tf.float32) + pixel_center
+        y = tf.cast(locations[..., 0], tf.float32) + pixel_center
         return camera.to_world_rays(x, y)
