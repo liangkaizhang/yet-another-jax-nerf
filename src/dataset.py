@@ -41,7 +41,13 @@ class DatasetBuilder(object):
             ds = ds.repeat()
             ds = ds.shuffle(16 * len(self._images_meta), seed=0)
 
-        ds = ds.map(self._parse_single_image, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+        def _parser_fn(image_id: tf.Tensor):
+            origins, directions, pixels = tf.py_function(
+                                func=self._parse_single_image, inp=[image_id],
+                                Tout=[tf.float32, tf.float32, tf.float32])
+            return {"origins": origins, "directions": directions, "pixels": pixels}
+            
+        ds = ds.map(_parser_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
         if (self._config.is_training) and (not self._config.batch_from_single_image):
              # Unbatch rays sampled from the same image, shuffle and re-batch.
             ds = ds.unbatch()
@@ -54,31 +60,26 @@ class DatasetBuilder(object):
         return ds
 
     def _parse_single_image(self, image_id: tf.Tensor) -> Dict[str, tf.Tensor]:
-
-        def _parser_fn(image_id: tf.Tensor):
-            image_meta =self._images_meta[image_id.numpy()]  # tf.Tensor is unhashable!
-            image_filename = os.path.join(self._config.images_dir, image_meta.name)
-            image = tf.image.decode_image(tf.io.read_file(image_filename), channels=3)
-            if self._config.float_image:
-                image = tf.image.convert_image_dtype(image, tf.float32)
-            # Parse camera.
-            camera_meta = self._cameras_meta[image_meta.camera_id]
-            params = camera_meta.params
-            rotation = qvec2rotmat(image_meta.qvec)
-            translation = tf.expand_dims(image_meta.tvec, -1)
-            camera = Camera(*params, rotation, translation)
-            # Genrate rays from sampled pixels.
-            height = camera_meta.height
-            width = camera_meta.width
-            pixels, locations = self._sample_pixels(image, height, width)
-            rays = self._generate_rays(locations, camera)
-            origins = tf.convert_to_tensor(rays.origins, dtype=tf.float32)
-            directions = tf.convert_to_tensor(rays.directions, dtype=tf.float32)
-            return origins, directions, pixels
-        
-        origins, directions, pixels = tf.py_function(
-            func=_parser_fn, inp=[image_id], Tout=[tf.float32, tf.float32, tf.float32])
-        return {"origins": origins, "directions": directions, "pixels": pixels}
+        # Decode image.
+        image_meta =self._images_meta[image_id.numpy()]  # tf.Tensor is unhashable!
+        image_filename = os.path.join(self._config.images_dir, image_meta.name)
+        image = tf.image.decode_image(tf.io.read_file(image_filename), channels=3)
+        if self._config.float_image:
+            image = tf.image.convert_image_dtype(image, tf.float32)
+        # Parse camera.
+        camera_meta = self._cameras_meta[image_meta.camera_id]
+        params = camera_meta.params
+        rotation = qvec2rotmat(image_meta.qvec)
+        translation = tf.expand_dims(image_meta.tvec, -1)
+        camera = Camera(*params, rotation, translation)
+        # Genrate rays from sampled pixels.
+        height = camera_meta.height
+        width = camera_meta.width
+        pixels, locations = self._sample_pixels(image, height, width)
+        rays = self._generate_rays(locations, camera)
+        origins = tf.convert_to_tensor(rays.origins, dtype=tf.float32)
+        directions = tf.convert_to_tensor(rays.directions, dtype=tf.float32)
+        return origins, directions, pixels
 
     def _sample_pixels(self, image: tf.Tensor,
                        height: tf.int32, width: tf.int32) -> Tuple[tf.Tensor, tf.Tensor]:
