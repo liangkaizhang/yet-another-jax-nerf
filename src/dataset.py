@@ -58,7 +58,7 @@ class DatasetBuilder(object):
         return ds
 
     def _parse_dataset(self):
-        for image_id, _ in self._images_meta.items():
+        for image_id in self._images_meta:
             yield self._parse_single_image(image_id)
 
     def _parse_single_image(self, image_id: int) -> Dict[str, tf.Tensor]:
