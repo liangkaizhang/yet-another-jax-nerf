@@ -1,13 +1,12 @@
 import threading
-from typing import Callable, Dict, List, Tuple
+from typing import Dict, List, Tuple
 import attr
 import os
-from collections import defaultdict
-from numpy.lib.type_check import imag
+import random
 import tensorflow as tf
 
 from read_write_model import read_model, qvec2rotmat
-from geometry import  Rays, Camera
+from geometry import  Rays, ColoredRays, Camera
 
 
 @attr.s(frozen=True, auto_attribs=True)
@@ -17,7 +16,6 @@ class DatasetConfig:
     images_dir: str
     batch_size: int
     batch_from_single_image: bool = False
-    is_training: bool = False
     prefetch_size: int = 10
     float_image: bool = True
     use_pixel_centers = True
@@ -29,37 +27,48 @@ class DatasetBuilder(object):
     def __init__(self, config: DatasetConfig):
         self._config = config
         self._cameras_meta, self._images_meta, _ = read_model(self._config.model_dir, ext=".bin")
-    
-    def build(self) -> tf.data.Dataset:
+        self._create_split()
+
+    def _create_split(self):
         image_indices = list(self._images_meta.keys())
+        random.shuffle(image_indices)
+        num_train = int(round(len(image_indices) * 0.9))
+        self._train_split_indices = image_indices[:num_train]
+        self._test_split_indices = image_indices[num_train:]
+    
+    def build_train_dataset(self):
+        return self._build(self._train_split_indices, True)
+
+    def build_test_dataset(self):
+        return self._build(self._test_split_indices, False)
+
+    def _build(self, image_indices: List, is_training: bool) -> tf.data.Dataset:
         ds = tf.data.Dataset.from_tensor_slices(image_indices)
         options = tf.data.Options()
         options.threading.private_threadpool_size = 48
         ds = ds.with_options(options)
 
-        if self._config.is_training:
+        if is_training:
             ds = ds.repeat()
-            ds = ds.shuffle(16 * len(self._images_meta), seed=0)
 
         def _parser_fn(image_id: tf.Tensor):
-            origins, directions, pixels = tf.py_function(
-                                func=self._parse_single_image, inp=[image_id],
-                                Tout=[tf.float32, tf.float32, tf.float32])
-            return {"origins": origins, "directions": directions, "pixels": pixels}
+            return tf.py_function(func=self._parse_single_image,
+                                  inp=[image_id],
+                                  Tout=[tf.float32, tf.float32, tf.float32])
             
         ds = ds.map(_parser_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
-        if (self._config.is_training) and (not self._config.batch_from_single_image):
+        if is_training and (not self._config.batch_from_single_image):
              # Unbatch rays sampled from the same image, shuffle and re-batch.
             ds = ds.unbatch()
             ds = ds.shuffle(16 * self._config.batch_size, seed=0)
             ds = ds.batch(self._config.batch_size)
 
-        if not self._config.is_training:
+        if not is_training:
             ds = ds.repeat()
         ds = ds.prefetch(self._config.prefetch_size)
         return ds
 
-    def _parse_single_image(self, image_id: tf.Tensor) -> Dict[str, tf.Tensor]:
+    def _parse_single_image(self, image_id: tf.Tensor) -> ColoredRays:
         # Decode image.
         image_meta =self._images_meta[image_id.numpy()]  # tf.Tensor is unhashable!
         image_filename = os.path.join(self._config.images_dir, image_meta.name)
@@ -75,11 +84,11 @@ class DatasetBuilder(object):
         # Genrate rays from sampled pixels.
         height = camera_meta.height
         width = camera_meta.width
-        pixels, locations = self._sample_pixels(image, height, width)
+        colors, locations = self._sample_pixels(image, height, width)
         rays = self._generate_rays(locations, camera)
         origins = tf.convert_to_tensor(rays.origins, dtype=tf.float32)
         directions = tf.convert_to_tensor(rays.directions, dtype=tf.float32)
-        return origins, directions, pixels
+        return ColoredRays(origins, directions, colors)
 
     def _sample_pixels(self, image: tf.Tensor,
                        height: tf.int32, width: tf.int32) -> Tuple[tf.Tensor, tf.Tensor]:
@@ -88,10 +97,10 @@ class DatasetBuilder(object):
         idxs = tf.range(tf.shape(image)[0])
         sample_per_image =self._config.batch_size
         ridxs = tf.random.shuffle(idxs)[:sample_per_image]
-        pixels = tf.gather(image, ridxs)
+        colors = tf.gather(image, ridxs)
         locations = tf.unravel_index(
             indices=ridxs, dims=[height, width])
-        return pixels, locations
+        return colors, locations
     
     def _generate_rays(self, locations: tf.Tensor, camera: Camera) -> Rays:
         """Generate rays emitting from pixel locations."""

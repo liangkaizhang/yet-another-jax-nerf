@@ -1,15 +1,11 @@
 from typing import List
-import attr
 import numpy as np
+from collections import namedtuple
 from tensorflow.python.ops.numpy_ops import np_config
 np_config.enable_numpy_behavior()
 
-
-@attr.s(frozen=True, auto_attribs=True)
-class Rays:
-    origins: np.ndarray
-    directions: np.ndarray
-
+Rays = namedtuple("Rays", ["origins", "directions"])
+ColoredRays = namedtuple("ColoredRays", ["origins", "directions", "colors"])
 
 class Camera(object):
     def __init__(self,
