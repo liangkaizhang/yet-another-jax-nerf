@@ -1,12 +1,11 @@
-import threading
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 import attr
 import os
 import random
 import tensorflow as tf
 
 from read_write_model import read_model, qvec2rotmat
-from geometry import  Rays, ColoredRays, Camera
+from geometry import Rays, ColoredRays, Camera
 
 
 @attr.s(frozen=True, auto_attribs=True)
@@ -88,7 +87,7 @@ class DatasetBuilder(object):
         rays = self._generate_rays(locations, camera)
         origins = tf.convert_to_tensor(rays.origins, dtype=tf.float32)
         directions = tf.convert_to_tensor(rays.directions, dtype=tf.float32)
-        return ColoredRays(origins, directions, colors)
+        return ColoredRays(Rays(origins, directions), colors)
 
     def _sample_pixels(self, image: tf.Tensor,
                        height: tf.int32, width: tf.int32) -> Tuple[tf.Tensor, tf.Tensor]:

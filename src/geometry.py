@@ -5,7 +5,7 @@ from tensorflow.python.ops.numpy_ops import np_config
 np_config.enable_numpy_behavior()
 
 Rays = namedtuple("Rays", ["origins", "directions"])
-ColoredRays = namedtuple("ColoredRays", ["origins", "directions", "colors"])
+ColoredRays = namedtuple("ColoredRays", ["rays", "colors"])
 
 class Camera(object):
     def __init__(self,
