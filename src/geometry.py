@@ -1,11 +1,18 @@
-from typing import List
+from typing import Union, NamedTuple
+
 import numpy as np
-from collections import namedtuple
+import jax.numpy as jnp
+import tensorflow as tf
 from tensorflow.python.ops.numpy_ops import np_config
+
 np_config.enable_numpy_behavior()
 
-Rays = namedtuple("Rays", ["origins", "directions"])
-ColoredRays = namedtuple("ColoredRays", ["rays", "colors"])
+
+class Rays(NamedTuple):
+    origins: Union[tf.Tensor, np.ndarray, jnp.ndarray]
+    directions: Union[tf.Tensor, np.ndarray, jnp.ndarray]
+    colors: Union[tf.Tensor, np.ndarray, jnp.ndarray]
+
 
 class Camera(object):
     def __init__(self,
@@ -32,7 +39,7 @@ class Camera(object):
 
         directions = _normalize(np.stack((xn, yn, zn), axis=-1))
         origins = np.zeros_like(directions)
-        return Rays(origins.T, directions.T)
+        return Rays(origins.T, directions.T, None)
 
     def to_world_rays(self, x: np.ndarray, y: np.ndarray, use_ndc=False) -> Rays:
         c_rays = self.to_local_rays(x, y, use_ndc)
@@ -41,4 +48,4 @@ class Camera(object):
         w_origins = np.matmul(self._rotation.T, w_origins)
         # Transform directions to world.
         w_directions = np.matmul(self._rotation.T, c_rays.directions)
-        return Rays(w_origins.T, w_directions.T)
+        return Rays(w_origins.T, w_directions.T, None)

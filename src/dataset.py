@@ -5,7 +5,9 @@ import random
 import tensorflow as tf
 
 from read_write_model import read_model, qvec2rotmat
-from geometry import Rays, ColoredRays, Camera
+from geometry import Rays, Camera
+
+tf.config.experimental.set_visible_devices([], 'GPU')
 
 
 @attr.s(frozen=True, auto_attribs=True)
@@ -67,7 +69,7 @@ class DatasetBuilder(object):
         ds = ds.prefetch(self._config.prefetch_size)
         return ds
 
-    def _parse_single_image(self, image_id: tf.Tensor) -> ColoredRays:
+    def _parse_single_image(self, image_id: tf.Tensor) -> Rays:
         # Decode image.
         image_meta =self._images_meta[image_id.numpy()]  # tf.Tensor is unhashable!
         image_filename = os.path.join(self._config.images_dir, image_meta.name)
@@ -87,7 +89,7 @@ class DatasetBuilder(object):
         rays = self._generate_rays(locations, camera)
         origins = tf.convert_to_tensor(rays.origins, dtype=tf.float32)
         directions = tf.convert_to_tensor(rays.directions, dtype=tf.float32)
-        return ColoredRays(Rays(origins, directions), colors)
+        return Rays(origins, directions, colors)
 
     def _sample_pixels(self, image: tf.Tensor,
                        height: tf.int32, width: tf.int32) -> Tuple[tf.Tensor, tf.Tensor]:
