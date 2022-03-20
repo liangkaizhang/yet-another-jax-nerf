@@ -11,20 +11,22 @@ from nerf_utils import sample_along_rays, positional_encoding, volumetric_render
 
 
 @attr.s(frozen=True, auto_attribs=True)
-class NetConfig:
+class MlpNetConfig:
   net_depth: int = 8  # The depth of the first part of MLP.
   net_width: int = 256  # The width of the first part of MLP.
   net_depth_condition: int = 1  # The depth of the second part of MLP.
   net_width_condition: int = 128  # The width of the second part of MLP.
-  net_activation: Callable[Ellipsis, Any] = nn.relu  # The activation function.
+  net_activation: Callable[Ellipsis, Any] = nn.relu  # The net activation function.
+  rgb_activation: Callable[Ellipsis, Any] = nn.sigmoid  # The rgb activation function.
+  sigma_activation: Callable[Ellipsis, Any] = nn.relu  # The sigma activation function.
   skip_layer: int = 4  # The layer to add skip layers to.
   num_rgb_channels: int = 3  # The number of RGB channels.
   num_sigma_channels: int = 1  # The number of sigma channels.
 
 
-class Net(nn.Module):
+class MlpNet(nn.Module):
     """A simple MLP."""
-    net_config: NetConfig
+    config: MlpNetConfig
 
     @nn.compact
     def __call__(self, x, condition=None):
@@ -73,6 +75,10 @@ class Net(nn.Module):
                 x = self.config.net_activation(x)
         raw_rgb = dense_layer(self.config.num_rgb_channels)(x).reshape(
             [-1, num_samples, self.config.num_rgb_channels])
+
+        # Add activations.
+        raw_rgb = self.config.rgb_activation(raw_rgb)
+        raw_sigma = self.config.sigma_activation(raw_sigma)
         return raw_rgb, raw_sigma
 
 
@@ -86,7 +92,7 @@ class NerfModuleConfig:
     min_deg_point: int = 0   # The minimum degree of positional encoding for positions.
     max_deg_point: int = 10  # The maximum degree of positional encoding for positions.
     white_bkgd: bool = False
-    net_config: NetConfig = NetConfig()
+    mlp_config: MlpNetConfig = MlpNetConfig()
 
 
 class NerfModule(nn.Module):
@@ -107,29 +113,31 @@ class NerfModule(nn.Module):
                                            num_samples=self.config.num_samples,
                                            randomized=self.config.randomized))
         points, points_z = sampler_fn(key, rays, bins, weights)
-        posi_encode = positional_encoding(posi_encode, self.config.min_deg_point,
+        posi_encode = positional_encoding(points, self.config.min_deg_point,
                                           self.config.max_deg_point)
         view_encode = None
         if self.config.use_views:
-            views = jnp.broadcast_to(rays.directions[:, jnp.newaxis, :], points.shape)
+            # views = jnp.broadcast_to(rays.directions[:, jnp.newaxis, :], points.shape)
+            views = rays.directions[:, jnp.newaxis, :]
             view_encode = positional_encoding(views, self.config.min_deg_point,
                                               self.config.max_deg_point)
-        raw_rgb, raw_sigma = Net(self.config.net_config)(posi_encode, view_encode)
-        rgb, disp, acc, new_weights = volumetric_rendering(raw_rgb,
-                                                           raw_sigma, points_z,
-                                                           rays.directions,
-                                                           self.config.white_bkgd)
-        return rgb, disp, acc, points_z, new_weights
+        raw_rgb, raw_sigma = MlpNet(self.config.mlp_config)(posi_encode, view_encode)
+        rgb, _, acc, new_weights = volumetric_rendering(raw_rgb,
+                                                        raw_sigma,
+                                                        points_z,
+                                                        rays.directions,
+                                                        self.config.white_bkgd)
+        return rgb, acc, points_z, new_weights
 
 
 @attr.s(frozen=True, auto_attribs=True)
-class NerfModelConfig:
-    coarse_module_config: NerfModuleConfig 
-    fine_module_config: NerfModuleConfig
+class NerfConfig:
+    coarse_module_config: NerfModuleConfig = NerfModuleConfig()
+    fine_module_config: NerfModuleConfig = NerfModuleConfig()
 
 
-class NerfModel(nn.Module):
-    config: NerfModelConfig
+class Nerf(nn.Module):
+    config: NerfConfig = NerfConfig()
 
     @nn.compact
     def __call__(self, rng: jnp.ndarray, rays: Rays):

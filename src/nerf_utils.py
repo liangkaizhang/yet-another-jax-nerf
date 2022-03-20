@@ -2,7 +2,7 @@ import jax.numpy as jnp
 from jax import random, vmap
 from geometry import Rays
 
-EPS = 1e-5
+EPS = 1e-10
 
 def sample_pdf(rng, bin_start, bin_width, bin_weights, num_samples, randomized=False):
     bin_weights += EPS
@@ -26,7 +26,7 @@ def sample_pdf(rng, bin_start, bin_width, bin_weights, num_samples, randomized=F
     slope = (uniform_samples - cdf_lower) / bin_prob
     
     sampled_values = bin_start[index_lower] + slope * bin_width[index_lower]
-    return sampled_values
+    return jnp.sort(sampled_values)
 
 
 def sample_along_rays(rng: jnp.ndarray, rays: Rays, all_bins, all_weights, num_samples: int, randomized: bool = False) -> jnp.ndarray:
@@ -58,19 +58,20 @@ def positional_encoding(x: jnp.ndarray, min_deg: int, max_deg: int):
 def volumetric_rendering(points_rgb, points_sigma, points_z, dirs, white_bkgd=True):
     dists = points_z[..., 1:] - points_z[..., :-1]
     dists = jnp.concatenate([dists, 1e10 * jnp.ones_like(dists[..., :1])], axis=-1)
-    dists = dists * jnp.linalg.norm(dirs, axis=-1)
+    dists = dists * jnp.linalg.norm(dirs, axis=-1, keepdims=True)
 
-    dists_sigma = points_sigma * dists
+    dists_sigma = points_sigma[..., -1] * dists
     alpha = 1.0 - jnp.exp(-dists_sigma)
 
-    transmit = jnp.exp(-jnp.cumsum(dists_sigma[..., :-1], axis=-1))
-    transmit = jnp.concatenate([jnp.ones_like(transmit[..., :1]), transmit], axis=-1)
+    transmit = jnp.exp(-jnp.cumsum(dists_sigma[:, :-1], axis=-1))
+    transmit = jnp.concatenate([jnp.ones_like(transmit[:, :1]), transmit], axis=-1)
     weights = alpha * transmit
-
-    rgb = jnp.sum(weights[..., jnp.newaxis] * points_rgb, axis=-2)
-    depth = jnp.sum(weights * points_z, axis=-1)
-    acc = jnp.sum(weights, axis=-1)
+    
+    rgb = jnp.sum(weights[..., jnp.newaxis] * points_rgb, axis=1)
+    depth = jnp.sum(weights * points_z, axis=1, keepdims=True)
+    
+    acc = jnp.sum(weights, axis=-1, keepdims=True)
     disp = acc / (depth + EPS)
     if white_bkgd:
-        rgb = rgb + (1. - acc[..., jnp.newaxis])
+        rgb = rgb + (1. - acc)
     return rgb, disp, acc, weights
