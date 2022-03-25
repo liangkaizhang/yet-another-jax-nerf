@@ -4,6 +4,7 @@ import functools
 
 from flax import linen as nn
 import jax.numpy as jnp
+import jax
 from jax import jit, random
 
 from geometry import Rays
@@ -16,12 +17,12 @@ class MlpNetConfig:
   net_width: int = 256  # The width of the first part of MLP.
   net_depth_condition: int = 1  # The depth of the second part of MLP.
   net_width_condition: int = 128  # The width of the second part of MLP.
-  net_activation: Callable[Ellipsis, Any] = nn.relu  # The net activation function.
-  rgb_activation: Callable[Ellipsis, Any] = nn.sigmoid  # The rgb activation function.
-  sigma_activation: Callable[Ellipsis, Any] = nn.relu  # The sigma activation function.
   skip_layer: int = 4  # The layer to add skip layers to.
   num_rgb_channels: int = 3  # The number of RGB channels.
   num_sigma_channels: int = 1  # The number of sigma channels.
+  net_activation: Callable[Ellipsis, Any] = nn.relu  # The net activation function.
+  rgb_activation: Callable[Ellipsis, Any] = nn.sigmoid  # The rgb activation function.
+  sigma_activation: Callable[Ellipsis, Any] = nn.relu  # The sigma activation function.
 
 
 class MlpNet(nn.Module):
@@ -151,4 +152,9 @@ class Nerf(nn.Module):
         return coarse_rgb, fine_rgb
 
 
-
+def nerf_builder(rng: jnp.ndarray, config: NerfConfig, examplar_rays: Rays):
+    model = Nerf(config)
+    key1, key2, rng = random.split(rng, num=3)
+    rays = jax.tree_map(lambda x: x[0], examplar_rays)
+    params = model.init(key1, rng=key2, rays=rays)
+    return model, params

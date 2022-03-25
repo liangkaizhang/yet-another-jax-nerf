@@ -13,9 +13,9 @@ tf.config.experimental.set_visible_devices([], 'GPU')
 @attr.s(frozen=True, auto_attribs=True)
 class DatasetConfig:
     """Dataset configuration class."""
-    model_dir: str
-    images_dir: str
-    batch_size: int
+    model_dir: str = ""
+    images_dir: str = ""
+    batch_size: int = 0
     batch_from_single_image: bool = False
     prefetch_size: int = 10
     float_image: bool = True
@@ -89,7 +89,7 @@ class DatasetBuilder(object):
         rays = self._generate_rays(locations, camera)
         origins = tf.convert_to_tensor(rays.origins, dtype=tf.float32)
         directions = tf.convert_to_tensor(rays.directions, dtype=tf.float32)
-        return Rays(origins, directions, colors)
+        return origins, directions, colors
 
     def _sample_pixels(self, image: tf.Tensor,
                        height: tf.int32, width: tf.int32) -> Tuple[tf.Tensor, tf.Tensor]:

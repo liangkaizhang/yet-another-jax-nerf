@@ -2,7 +2,7 @@ import jax.numpy as jnp
 from jax import random, vmap
 from geometry import Rays
 
-EPS = 1e-10
+EPS = 1e-5
 
 def sample_pdf(rng, bin_start, bin_width, bin_weights, num_samples, randomized=False):
     bin_weights += EPS
