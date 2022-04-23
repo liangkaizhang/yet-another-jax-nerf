@@ -2,7 +2,8 @@ import jax.numpy as jnp
 from jax import random, vmap
 from geometry import Rays
 
-EPS = 1e-5
+EPS = 1e-10
+
 
 def sample_pdf(rng, bin_start, bin_width, bin_weights, num_samples, randomized=False):
     bin_weights += EPS
@@ -36,13 +37,13 @@ def sample_along_rays(rng: jnp.ndarray, rays: Rays, all_bins, all_weights, num_s
         bin_width = bins[..., 1:] - bins[..., :-1]
         bin_weights = .5 * (weights[..., 1:] + weights[..., :-1])
         z_samples = sample_pdf(rng, bin_start, bin_width, bin_weights, num_samples, randomized)
-        direction = z_samples[..., jnp.newaxis] * direction[jnp.newaxis, :]
-        points = origin[jnp.newaxis, :] + direction
+        direction = z_samples[..., None] * direction[None, :]
+        points = origin[None, :] + direction
         return points, z_samples
 
     num_rays = rays.origins.shape[0]
-    rngs = random.split(rng, num_rays)
-    points, z_values = vmap(sample_helper)(rngs, rays.origins, rays.directions, all_bins, all_weights)
+    keys = random.split(rng, num_rays)
+    points, z_values = vmap(sample_helper)(keys, rays.origins, rays.directions, all_bins, all_weights)
     return points, z_values
 
 
@@ -50,14 +51,14 @@ def positional_encoding(x: jnp.ndarray, min_deg: int, max_deg: int):
     if min_deg == max_deg:
         return x
     scales = jnp.array([2**i for i in range(min_deg, max_deg)])
-    xb = jnp.reshape(x[..., jnp.newaxis] * scales, [x.shape[0], x.shape[1], -1])
+    xb = jnp.reshape(x[..., None, :] * scales[:, None], list(x.shape[:-1]) + [-1])
     four_feat = jnp.sin(jnp.concatenate([xb, xb + 0.5 * jnp.pi], axis=-1))
     return jnp.concatenate([x] + [four_feat], axis=-1)
 
 
 def volumetric_rendering(points_rgb, points_sigma, points_z, dirs, white_bkgd=True):
     dists = points_z[..., 1:] - points_z[..., :-1]
-    dists = jnp.concatenate([dists, 1e10 * jnp.ones_like(dists[..., :1])], axis=-1)
+    dists = jnp.concatenate([dists, 1 / EPS * jnp.ones_like(dists[..., :1])], axis=-1)
     dists = dists * jnp.linalg.norm(dirs, axis=-1, keepdims=True)
 
     dists_sigma = points_sigma[..., -1] * dists
@@ -67,7 +68,7 @@ def volumetric_rendering(points_rgb, points_sigma, points_z, dirs, white_bkgd=Tr
     transmit = jnp.concatenate([jnp.ones_like(transmit[:, :1]), transmit], axis=-1)
     weights = alpha * transmit
     
-    rgb = jnp.sum(weights[..., jnp.newaxis] * points_rgb, axis=1)
+    rgb = jnp.sum(weights[..., None] * points_rgb, axis=1)
     depth = jnp.sum(weights * points_z, axis=1, keepdims=True)
     
     acc = jnp.sum(weights, axis=-1, keepdims=True)

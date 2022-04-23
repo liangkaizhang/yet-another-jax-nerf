@@ -12,25 +12,32 @@ class Rays(NamedTuple):
     origins: Union[tf.Tensor, np.ndarray, jnp.ndarray]
     directions: Union[tf.Tensor, np.ndarray, jnp.ndarray]
     colors: Union[tf.Tensor, np.ndarray, jnp.ndarray]
+    depth: Union[tf.Tensor, np.ndarray, jnp.ndarray] = None
+    weights: Union[tf.Tensor, np.ndarray, jnp.ndarray] = None
 
 
 class Camera(object):
     def __init__(self,
                  fx: float, fy: float, cx: float, cy: float,
+                 width: int, height: int,
                  rotation: np.ndarray, translation: np.ndarray,
                  near: float=0.0, far: float=1000.):
-        self._fx = fx
-        self._fy = fy
-        self._cx = cx
-        self._cy = cy
-        self._rotation = rotation
-        self._translation = translation
-        self._near = near
-        self._far = far
+        ratio = 4032 / 484
+        self.fx = fx / ratio
+        self.fy = fy / ratio
+        self.cx = cx / ratio
+        self.cy = cy / ratio
+        self.width = int(width / ratio)
+        self.height = int(height / ratio)
+        self.rotation = rotation
+        self.translation = translation
+        self.near = near
+        self.far = far
+
 
     def to_local_rays(self, x: np.ndarray, y: np.ndarray, use_ndc=False) -> Rays:
-        xn = (x - self._cx) / self._fx
-        yn = (y - self._cy) / self._fy
+        xn = (x - self.cx) / self.fx
+        yn = (y - self.cy) / self.fy
         zn = np.ones_like(xn)
     
         def _normalize(x):
@@ -44,8 +51,8 @@ class Camera(object):
     def to_world_rays(self, x: np.ndarray, y: np.ndarray, use_ndc=False) -> Rays:
         c_rays = self.to_local_rays(x, y, use_ndc)
         # Transform origins to world.
-        w_origins = c_rays.origins - self._translation
-        w_origins = np.matmul(self._rotation.T, w_origins)
+        w_origins = c_rays.origins - self.translation
+        w_origins = np.matmul(self.rotation.T, w_origins)
         # Transform directions to world.
-        w_directions = np.matmul(self._rotation.T, c_rays.directions)
+        w_directions = np.matmul(self.rotation.T, c_rays.directions)
         return Rays(w_origins.T, w_directions.T, None)

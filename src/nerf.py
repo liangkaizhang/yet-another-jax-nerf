@@ -2,17 +2,19 @@ from typing import Any, Callable
 import attr
 import functools
 
+import gin
 from flax import linen as nn
 import jax.numpy as jnp
 import jax
 from jax import jit, random
 
 from geometry import Rays
-from nerf_utils import sample_along_rays, positional_encoding, volumetric_rendering
+import nerf_utils
 
 
-@attr.s(frozen=True, auto_attribs=True)
-class MlpNetConfig:
+#@gin.configurable
+@attr.s(auto_attribs=True)
+class MLPConfig:
   net_depth: int = 8  # The depth of the first part of MLP.
   net_width: int = 256  # The width of the first part of MLP.
   net_depth_condition: int = 1  # The depth of the second part of MLP.
@@ -20,17 +22,18 @@ class MlpNetConfig:
   skip_layer: int = 4  # The layer to add skip layers to.
   num_rgb_channels: int = 3  # The number of RGB channels.
   num_sigma_channels: int = 1  # The number of sigma channels.
+  noise_std: float = 0.02  # Std dev of sigma noise.
   net_activation: Callable[Ellipsis, Any] = nn.relu  # The net activation function.
   rgb_activation: Callable[Ellipsis, Any] = nn.sigmoid  # The rgb activation function.
   sigma_activation: Callable[Ellipsis, Any] = nn.relu  # The sigma activation function.
 
 
-class MlpNet(nn.Module):
+class MLP(nn.Module):
     """A simple MLP."""
-    config: MlpNetConfig
+    config: MLPConfig
 
     @nn.compact
-    def __call__(self, x, condition=None):
+    def __call__(self, rng, x, condition=None, randomized=True):
         """Evaluate the MLP.
         Args:
         x: jnp.ndarray(float32), [batch, num_samples, feature], points.
@@ -79,30 +82,37 @@ class MlpNet(nn.Module):
 
         # Add activations.
         raw_rgb = self.config.rgb_activation(raw_rgb)
+
+        if randomized and self.config.noise_std:
+            noise = random.normal(rng, raw_sigma.shape, dtype=raw_sigma.dtype)
+            raw_sigma += noise * self.config.noise_std
+
         raw_sigma = self.config.sigma_activation(raw_sigma)
         return raw_rgb, raw_sigma
 
 
-@attr.s(frozen=True, auto_attribs=True)
+#@gin.configurable
+@attr.s(auto_attribs=True)
 class NerfModuleConfig:
-    near_clip: float = 0.001  # The near clipping distance when sampling along rays.
-    far_clip: float = 1000.  # The far clipping distance when sampling along rays.
+    near_clip: float = 0.01  # The near clipping distance when sampling along rays.
+    far_clip: float = 50.  # The far clipping distance when sampling along rays.
     num_samples: int = 100  # Number of sampling points along rays.
-    randomized: bool = True  # Whether random sample.
-    use_views: bool = True
     min_deg_point: int = 0   # The minimum degree of positional encoding for positions.
     max_deg_point: int = 10  # The maximum degree of positional encoding for positions.
-    white_bkgd: bool = False
-    mlp_config: MlpNetConfig = MlpNetConfig()
+    white_bkgd: bool = True
+    mlp_config: MLPConfig = MLPConfig()
 
 
 class NerfModule(nn.Module):
     config: NerfModuleConfig
 
     @nn.compact
-    def __call__(self, rng: jnp.ndarray, rays: Rays,
-                 weights: jnp.ndarray=None, bins: jnp.ndarray=None):
-        key, rng = random.split(rng)
+    def __call__(self,
+                 rng: jnp.ndarray,
+                 rays: Rays,
+                 weights: jnp.ndarray=None,
+                 bins: jnp.ndarray=None,
+                 randomized=True):
         if weights is None:
             num_rays = rays.origins.shape[0]
             num_bins = self.config.num_samples
@@ -110,28 +120,29 @@ class NerfModule(nn.Module):
             bins = jnp.broadcast_to(bins, (num_rays, num_bins))
             weights = jnp.ones_like(bins)
 
-        sampler_fn = jit(functools.partial(sample_along_rays,
+        sampler_fn = jit(functools.partial(nerf_utils.sample_along_rays,
                                            num_samples=self.config.num_samples,
-                                           randomized=self.config.randomized))
+                                           randomized=randomized))
+        key, rng = random.split(rng)
         points, points_z = sampler_fn(key, rays, bins, weights)
-        posi_encode = positional_encoding(points, self.config.min_deg_point,
+        posi_encode = nerf_utils.positional_encoding(points, self.config.min_deg_point,
                                           self.config.max_deg_point)
-        view_encode = None
-        if self.config.use_views:
-            # views = jnp.broadcast_to(rays.directions[:, jnp.newaxis, :], points.shape)
-            views = rays.directions[:, jnp.newaxis, :]
-            view_encode = positional_encoding(views, self.config.min_deg_point,
-                                              self.config.max_deg_point)
-        raw_rgb, raw_sigma = MlpNet(self.config.mlp_config)(posi_encode, view_encode)
-        rgb, _, acc, new_weights = volumetric_rendering(raw_rgb,
-                                                        raw_sigma,
-                                                        points_z,
-                                                        rays.directions,
-                                                        self.config.white_bkgd)
-        return rgb, acc, points_z, new_weights
+        views = rays.directions[:, jnp.newaxis, :]
+        view_encode = nerf_utils.positional_encoding(views, self.config.min_deg_point,
+                                            self.config.max_deg_point)
+
+        key, rng = random.split(rng)
+        mlp =  MLP(self.config.mlp_config)
+        raw_rgb, raw_sigma =mlp(key, posi_encode, view_encode, randomized)
+
+        rgb, disp, acc, weights = nerf_utils.volumetric_rendering(
+            raw_rgb, raw_sigma, points_z, rays.directions, self.config.white_bkgd)
+        return rgb, disp, acc, points_z, weights
 
 
-@attr.s(frozen=True, auto_attribs=True)
+
+#@gin.configurable
+@attr.s(auto_attribs=True)
 class NerfConfig:
     coarse_module_config: NerfModuleConfig = NerfModuleConfig()
     fine_module_config: NerfModuleConfig = NerfModuleConfig()
@@ -141,20 +152,24 @@ class Nerf(nn.Module):
     config: NerfConfig = NerfConfig()
 
     @nn.compact
-    def __call__(self, rng: jnp.ndarray, rays: Rays):
+    def __call__(self, rng: jnp.ndarray, rays: Rays, randomized=True):
         """Nerf Model"""
-        rng0, rng1 = random.split(rng)
+        key0, key1 = random.split(rng)
+
         coarse_nerf = NerfModule(self.config.coarse_module_config)
-        coarse_rgb, _, bins, weights = coarse_nerf(rng0, rays)
+        coarse_rgb, _, _, bins, weights = coarse_nerf(key0, rays, randomized)
 
         fine_nerf = NerfModule(self.config.fine_module_config)
-        fine_rgb, _, _, _ = fine_nerf(rng1, rays, bins, weights)
+        fine_rgb, _, _, _, _ = fine_nerf(key1, rays, bins, weights, randomized)
         return coarse_rgb, fine_rgb
 
 
-def nerf_builder(rng: jnp.ndarray, config: NerfConfig, examplar_rays: Rays):
-    model = Nerf(config)
-    key1, key2, rng = random.split(rng, num=3)
-    rays = jax.tree_map(lambda x: x[0], examplar_rays)
-    params = model.init(key1, rng=key2, rays=rays)
+def nerf_builder(rng: jnp.ndarray, config: NerfModuleConfig):
+    def _tmp_rays():
+        tmp = jnp.zeros([1, 3], dtype=jnp.float32)
+        return Rays(tmp, tmp, tmp)
+
+    model = NerfModule(config)
+    key0, key1 = random.split(rng)
+    params = model.init(key0, rng=key1, rays=_tmp_rays())
     return model, params
