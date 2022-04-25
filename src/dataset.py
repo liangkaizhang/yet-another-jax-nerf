@@ -46,12 +46,16 @@ class DatasetBuilder(object):
         self._test_split_indices = image_indices[num_train:]
     
     def build_train_dataset(self):
-        return self._build(self._train_split_indices,
-                           self._config.train_batch_size, True)
+        with tf.device('/cpu:0'):
+            return self._build(self._train_split_indices,
+                            self._config.train_batch_size,
+                            is_training=True)
 
     def build_test_dataset(self):
-        return self._build(self._test_split_indices,
-                           self._config.test_batch_size, False)
+        with tf.device('/cpu:0'):
+            return self._build(self._test_split_indices,
+                            self._config.test_batch_size,
+                            is_training=False)
 
     def _build(self, image_indices: List,
                batch_size: int, is_training: bool) -> tf.data.Dataset:
@@ -63,12 +67,19 @@ class DatasetBuilder(object):
         if is_training:
             ds = ds.repeat()
 
+        if is_training:
+            num_depth_samples = int(batch_size * self._config.depth_sample_ratio)
+            num_color_samples = batch_size - num_depth_samples
+        else:
+            num_depth_samples = 0
+            num_color_samples = batch_size
+
         def _parser_fn(image_id: tf.Tensor):
             return tf.py_function(func=self._parse_single_image,
-                                  inp=[image_id, batch_size],
-                                  Tout=[tf.float32, tf.float32, tf.float32])
+                                  inp=[image_id, num_color_samples, num_depth_samples],
+                                  Tout=[tf.float32, tf.float32, tf.float32, tf.float32, tf.float32])
             
-        ds = ds.map(_parser_fn, num_parallel_calls=tf.data.experimental.AUTOTUNE)
+        ds = ds.map(_parser_fn) #, num_parallel_calls=tf.data.experimental.AUTOTUNE)
         if is_training and (not self._config.batch_from_single_image):
              # Unbatch rays sampled from the same image, shuffle and re-batch.
             ds = ds.unbatch()
@@ -80,13 +91,39 @@ class DatasetBuilder(object):
         ds = ds.prefetch(self._config.prefetch_size)
         return ds
 
-    def _parse_single_image(self, image_id: tf.Tensor, sample_per_image: int):
+    def _parse_single_image(self,
+                            image_id: tf.Tensor,
+                            num_color_samples: int,
+                            num_depth_samples: int):
+        """Parse rays from single image.
+
+            Finds values for query points on a grid using bilinear interpolation.
+    
+        Args:
+            image_id: id of the input image.
+            num_color_samples: number of ray samples with color info only.
+            num_depth_samples: number of ray samples with depth.
+
+        Returns:
+            origins: ray origins of shape `[num_samples, 3]`.
+            directions: ray directions of shape `[num_samples, 3]`.
+            colors: ray colors of shape `[num_samples, 3]`.
+            depths: ray depths of shape `[num_samples, 1]`.
+            weights: ray weights of shape `[num_samples, 1]`.
+
+        Raises:
+            ValueError: if both `num_color_samples` and `num_depth_samples` are zeros.
+        """
+        if (not num_color_samples) and (not num_depth_samples):
+            raise ValueError("Inputs `num_color_samples` or `num_depth_samples` can't be both zeros.")
+
         # Decode image.
         image_meta =self._images_meta[image_id.numpy()]  # tf.Tensor is unhashable!
         image_filename = os.path.join(self._config.images_dir, image_meta.name)
-        image = tf.image.decode_image(tf.io.read_file(image_filename.replace('JPG', 'png')), channels=3)
+        image = tf.image.decode_image(tf.io.read_file(image_filename), channels=3)
         if self._config.float_image:
             image = tf.image.convert_image_dtype(image, tf.float32)
+
         # Parse camera.
         camera_meta = self._cameras_meta[image_meta.camera_id]
         params = camera_meta.params
@@ -96,65 +133,102 @@ class DatasetBuilder(object):
         translation = tf.expand_dims(image_meta.tvec, -1)
         camera = Camera(*params, width, height, rotation, translation)
     
-        # Genrate rays samples.
-        num_depth_samples = int(sample_per_image * self._config.depth_sample_ratio)
-        num_color_samples = sample_per_image - num_depth_samples
-        origins, directions, colors = self._sample_color_rays(image, camera, num_color_samples)
-        depth = tf.ones_like(colors[..., -1:]) * np.nan
-        weights = tf.ones_like(colors[..., -1:]) * np.nan
+        origins = []
+        directions = []
+        colors = []
+        depths = []
+        weights = []
 
-        # if num_depth_samples > 0:
-        #     # Parse 2D  key-points.
-        #     points_2d = image_meta.xys
-        #     points_idx = image_meta.point3D_ids
-        #     valid_idx = points_idx != -1
-        #     points_2d = points_2d[valid_idx]
-        #     points_idx = points_idx[valid_idx]
+        # Genrate color rays.
+        if num_color_samples:
+            origins_c, directions_c, colors_c = self._sample_color_rays(
+                image, camera, num_color_samples)
+            origins.append(origins_c)
+            directions.append(directions_c)
+            colors.append(colors_c)
+            depths.append(tf.ones_like(colors_c[..., -1:]) * np.nan)
+            weights.append(tf.ones_like(colors_c[..., -1:]) * np.nan)
 
-        #     origins_d, directions_d, colors_d, depth, weights = self._sample_depth_rays(
-        #         image, camera, points_2d, points_idx, num_depth_samples)
+        # Genrate depth rays.
+        if num_depth_samples:
+            # Parse 2D/3D key-points.
+            points_2d = image_meta.xys
+            points_3d_idx = image_meta.point3D_ids
+            valid_points_idx = (points_3d_idx != -1)
+            points_2d = points_2d[valid_points_idx]
+            points_3d_idx = points_3d_idx[valid_points_idx]
+            points_3d = np.array([self._points_3d[i].xyz for i in points_3d_idx])
+            errors = np.array([self._points_3d[i].error for i in points_3d_idx])
 
-        #     origins = tf.concat((origins, origins_d), axis=0)
-        #     directions = tf.concat((directions, directions_d), axis=0)
-        #     colors = tf.concat((colors, colors_d), axis=0)
-        #     depth = tf.concat((depth, depth))
-        #     weights = tf.concat((weights, weights))
+             # Genrate depth rays.
+            origins_d, directions_d, colors_d, depths_d, weights_d = self._sample_depth_rays(
+                image, camera, points_2d, points_3d, errors, num_depth_samples)
 
-        return origins, directions, colors, depth, weights
+            origins.append(origins_d)
+            directions.append(directions_d)
+            colors.append(colors_d)
+            depths.append(depths_d)
+            weights.append(weights_d)
+    
+
+        origins = tf.concat(origins, axis=0)
+        directions = tf.concat(directions, axis=0)
+        colors = tf.concat(colors, axis=0)
+        depths = tf.concat(depths, axis=0)
+        weights = tf.concat(weights, axis=0)
+
+        # Random shuffle all results.
+        idxs = tf.range(num_color_samples + num_depth_samples)
+        idxs = tf.random.shuffle(idxs)
+        origins = origins[idxs, :]
+        directions = directions[idxs, :]
+        colors = colors[idxs, :]
+        depths = depths[idxs]
+        weights = weights[idxs]
+        return origins, directions, colors, depths, weights
 
     def _sample_color_rays(self, image, camera, num_samples):
+        height, width, _ = image.shape
+        if num_samples > height * width:
+            raise ValueError("Input `num_samples` exceeds image resolution!")
+
         colors, locations = dataset_utils.sample_pixels(image, num_samples)
-        x = tf.cast(locations[1, ...], tf.float32)
-        y = tf.cast(locations[0, ...], tf.float32)
-        rays = self.generate_rays(x, y, camera)
+        x = tf.cast(locations[..., 1], tf.float32)
+        y = tf.cast(locations[..., 0], tf.float32)
+        rays = dataset_utils.generate_rays(x, y, camera, self._config.use_pixel_centers)
         origins = tf.convert_to_tensor(rays.origins, dtype=tf.float32)
         directions = tf.convert_to_tensor(rays.directions, dtype=tf.float32)
         return origins, directions, colors
 
-    def _sample_depth_rays(self, image, camera, points_2d, points_idx, num_samples):
-        idxs = tf.range(tf.shape(points_2d)[0])
-        ridxs = tf.random.shuffle(idxs)[:num_samples]
-        points_2d = points_2d[ridxs]
-        points_idx = points_idx[ridxs]
-        points_3d = np.array([self._points_3d[idx].xyz for idx in points_idx])
-        weights = np.array([self._points_3d[idx].error for idx in points_idx])
+    def _sample_depth_rays(self, image, camera, all_points_2d, all_points_3d, all_errors, num_samples):
+        # Random sample 2D points.
+        num_points = all_points_2d.shape[0]
+        idx = np.random.randint(0, num_points, size=num_samples)
+        points_2d = all_points_2d[idx, :]
+  
+        # Retrieve corresponding 3D points.
+        points_3d = all_points_3d[idx, :]
+
+        # Retrieve corresponding point weights.
+        errors = all_errors[idx]
+        mean_error = np.mean(all_errors)
+        weights = np.exp(-(errors / mean_error) ** 2)
+
+        # Sample color values for all 2D points.
         colors = dataset_utils.interpolate_bilinear(image, points_2d)
 
+        # Generate rays for all 2D points.
         x = points_2d[..., 0]
         y = points_2d[..., 1]
-        rays = self.generate_rays(x, y, camera)
+        rays = dataset_utils.generate_rays(x, y, camera, self._config.use_pixel_centers)
+
+        # Convert all results to tf tensors.
         origins = tf.convert_to_tensor(rays.origins, dtype=tf.float32)
         directions = tf.convert_to_tensor(rays.directions, dtype=tf.float32)
-        points_3d = tf.convert_to_tensor(points_3d)
-        depth = tf.norm(tf.points_3d - origins, axis=-1, keepdims=True)
-        weights = tf.convert_to_tensor(weights[..., None])
-        return origins, directions, colors, depth, weights
+        points_3d = tf.convert_to_tensor(points_3d, dtype=tf.float32)
+        depths = tf.norm(points_3d - origins, axis=-1, keepdims=True)
+        weights = tf.convert_to_tensor(weights[..., None], dtype=tf.float32)
+        colors = tf.convert_to_tensor(colors, dtype=tf.float32)
+        return origins, directions, colors, depths, weights
 
-
-    def generate_rays(self, x, y, camera: Camera) -> Rays:
-        """Generate rays emitting from pixel locations."""
-        pixel_center = 0.5 if self._config.use_pixel_centers else 0.0
-        x = x + pixel_center
-        y = y + pixel_center
-        return camera.to_world_rays(x, y)
 

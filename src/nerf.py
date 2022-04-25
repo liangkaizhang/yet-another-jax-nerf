@@ -22,7 +22,7 @@ class MLPConfig:
   skip_layer: int = 4  # The layer to add skip layers to.
   num_rgb_channels: int = 3  # The number of RGB channels.
   num_sigma_channels: int = 1  # The number of sigma channels.
-  noise_std: float = 0.02  # Std dev of sigma noise.
+  noise_std: float = 0.01  # Std dev of sigma noise.
   net_activation: Callable[Ellipsis, Any] = nn.relu  # The net activation function.
   rgb_activation: Callable[Ellipsis, Any] = nn.sigmoid  # The rgb activation function.
   sigma_activation: Callable[Ellipsis, Any] = nn.relu  # The sigma activation function.
@@ -95,7 +95,7 @@ class MLP(nn.Module):
 @attr.s(auto_attribs=True)
 class NerfModuleConfig:
     near_clip: float = 0.01  # The near clipping distance when sampling along rays.
-    far_clip: float = 50.  # The far clipping distance when sampling along rays.
+    far_clip: float = 100.  # The far clipping distance when sampling along rays.
     num_samples: int = 100  # Number of sampling points along rays.
     min_deg_point: int = 0   # The minimum degree of positional encoding for positions.
     max_deg_point: int = 10  # The maximum degree of positional encoding for positions.
@@ -135,9 +135,9 @@ class NerfModule(nn.Module):
         mlp =  MLP(self.config.mlp_config)
         raw_rgb, raw_sigma =mlp(key, posi_encode, view_encode, randomized)
 
-        rgb, disp, acc, weights = nerf_utils.volumetric_rendering(
+        rgb, depth, acc, weights = nerf_utils.volumetric_rendering(
             raw_rgb, raw_sigma, points_z, rays.directions, self.config.white_bkgd)
-        return rgb, disp, acc, points_z, weights
+        return rgb, depth, acc, points_z, weights
 
 
 
@@ -157,19 +157,19 @@ class Nerf(nn.Module):
         key0, key1 = random.split(rng)
 
         coarse_nerf = NerfModule(self.config.coarse_module_config)
-        coarse_rgb, _, _, bins, weights = coarse_nerf(key0, rays, randomized)
+        coarse_rgb, coarse_depth, _, bins, weights = coarse_nerf(key0, rays, randomized=randomized)
 
         fine_nerf = NerfModule(self.config.fine_module_config)
-        fine_rgb, _, _, _, _ = fine_nerf(key1, rays, bins, weights, randomized)
-        return coarse_rgb, fine_rgb
+        fine_rgb, fine_depth, _, _, _ = fine_nerf(key1, rays, bins, weights, randomized=randomized)
+        return coarse_rgb, coarse_depth, fine_rgb, fine_depth
 
 
-def nerf_builder(rng: jnp.ndarray, config: NerfModuleConfig):
+def nerf_builder(rng: jnp.ndarray, config: NerfConfig):
     def _tmp_rays():
         tmp = jnp.zeros([1, 3], dtype=jnp.float32)
-        return Rays(tmp, tmp, tmp)
+        return Rays(tmp, tmp)
 
-    model = NerfModule(config)
+    model = Nerf(config)
     key0, key1 = random.split(rng)
     params = model.init(key0, rng=key1, rays=_tmp_rays())
     return model, params

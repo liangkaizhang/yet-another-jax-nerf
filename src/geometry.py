@@ -11,24 +11,24 @@ np_config.enable_numpy_behavior()
 class Rays(NamedTuple):
     origins: Union[tf.Tensor, np.ndarray, jnp.ndarray]
     directions: Union[tf.Tensor, np.ndarray, jnp.ndarray]
-    colors: Union[tf.Tensor, np.ndarray, jnp.ndarray]
-    depth: Union[tf.Tensor, np.ndarray, jnp.ndarray] = None
+    colors: Union[tf.Tensor, np.ndarray, jnp.ndarray] = None
+    depths: Union[tf.Tensor, np.ndarray, jnp.ndarray] = None
     weights: Union[tf.Tensor, np.ndarray, jnp.ndarray] = None
 
 
 class Camera(object):
     def __init__(self,
-                 fx: float, fy: float, cx: float, cy: float,
+                 focal: float, cx: float, cy: float, skew: float,
                  width: int, height: int,
                  rotation: np.ndarray, translation: np.ndarray,
                  near: float=0.0, far: float=1000.):
-        ratio = 4032 / 484
-        self.fx = fx / ratio
-        self.fy = fy / ratio
-        self.cx = cx / ratio
-        self.cy = cy / ratio
-        self.width = int(width / ratio)
-        self.height = int(height / ratio)
+        self.fx = focal
+        self.fy = focal
+        self.cx = cx
+        self.cy = cy
+        self.skew = skew
+        self.width = int(width)
+        self.height = int(height)
         self.rotation = rotation
         self.translation = translation
         self.near = near
@@ -46,7 +46,7 @@ class Camera(object):
 
         directions = _normalize(np.stack((xn, yn, zn), axis=-1))
         origins = np.zeros_like(directions)
-        return Rays(origins.T, directions.T, None)
+        return Rays(origins.T, directions.T)
 
     def to_world_rays(self, x: np.ndarray, y: np.ndarray, use_ndc=False) -> Rays:
         c_rays = self.to_local_rays(x, y, use_ndc)
@@ -55,4 +55,4 @@ class Camera(object):
         w_origins = np.matmul(self.rotation.T, w_origins)
         # Transform directions to world.
         w_directions = np.matmul(self.rotation.T, c_rays.directions)
-        return Rays(w_origins.T, w_directions.T, None)
+        return Rays(w_origins.T, w_directions.T)

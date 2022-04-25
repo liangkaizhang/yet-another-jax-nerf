@@ -37,7 +37,7 @@ class OptimizerConfig:
     final_lr: float = 5e-6
     lr_delay_steps: int = 0
     lr_delay_mult: float = 1.
-    weight_decay: float = 0.
+    weight_decay: float = 1e-3
 
 
 #@gin.configurable
@@ -67,7 +67,8 @@ class Trainer:
         # Train loop.
         self._state = jax_utils.replicate(self._state)
         p_train_step = self.create_train_step()
-        keys = random.split(self._rng, 1)
+        key, self._rng = random.split(self._rng)
+        keys = random.split(key, 1)
         for step, rays in zip(range(self._config.max_steps), train_iter):
             self._state, metrics, keys = p_train_step(keys, self._state, rays)
             if self.should_log(step):
@@ -91,13 +92,34 @@ class Trainer:
         rng, key = random.split(rng)
 
         def loss_fn(params):
-            coarse_pred, fine_pred = state.apply_fn(params, key, rays)
-            loss_coarse = trainer_utils.photometric_loss(coarse_pred, rays.colors)
-            # loss_fine = trainer_utils.photometric_loss(fine_pred, rays.colors)
-            loss = loss_coarse # + loss_fine
-            metrics = {"loss_coarse": loss_coarse,
-                       # "loss_fine": loss_fine,
+            coarse_rgb, coarse_depth, fine_rgb, fine_depth = state.apply_fn(params, key, rays)
+
+            # Compute RGB loss.
+            loss_coarse_rgb = trainer_utils.mse_loss(coarse_rgb, rays.colors)
+            loss_fine_rgb = trainer_utils.mse_loss(fine_rgb, rays.colors)
+            loss_rgb = loss_coarse_rgb + loss_fine_rgb
+            
+            # Mask out invalid depth values.
+            mask = ~jnp.isnan(rays.depths)
+            depths_gt = jnp.where(mask, rays.depths, 0.)
+            weights_depth = jnp.where(mask, rays.weights, 0.)
+            coarse_depth = jnp.where(mask, coarse_depth, 0.)
+            fine_depth = jnp.where(mask, fine_depth, 0.)
+
+            # Compute depth loss.
+            loss_coarse_depth = trainer_utils.mse_loss(coarse_depth, depths_gt, weights_depth)
+            loss_fine_depth = trainer_utils.mse_loss(fine_depth, depths_gt, weights_depth)
+            loss_depth = loss_coarse_depth + loss_fine_depth
+        
+            # Final loss.
+            loss = loss_rgb + loss_depth
+            metrics = {"loss_coarse_rgb": loss_coarse_rgb,
+                       "loss_fine_rgb": loss_fine_rgb,
+                       "loss_coarse_depth": loss_coarse_depth,
+                       "loss_fine_depth": loss_fine_depth,
                        "loss": loss}
+
+            # Add weight decay.
             weight_penalty_params = jax.tree_leaves(params)
             weight_decay = 0.0001
             weight_l2 = sum([jnp.sum(x ** 2)

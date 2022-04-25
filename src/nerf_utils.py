@@ -56,8 +56,8 @@ def positional_encoding(x: jnp.ndarray, min_deg: int, max_deg: int):
     return jnp.concatenate([x] + [four_feat], axis=-1)
 
 
-def volumetric_rendering(points_rgb, points_sigma, points_z, dirs, white_bkgd=True):
-    dists = points_z[..., 1:] - points_z[..., :-1]
+def volumetric_rendering(points_rgb, points_sigma, points_distance, dirs, white_bkgd=True):
+    dists = points_distance[..., 1:] - points_distance[..., :-1]
     dists = jnp.concatenate([dists, 1 / EPS * jnp.ones_like(dists[..., :1])], axis=-1)
     dists = dists * jnp.linalg.norm(dirs, axis=-1, keepdims=True)
 
@@ -69,10 +69,9 @@ def volumetric_rendering(points_rgb, points_sigma, points_z, dirs, white_bkgd=Tr
     weights = alpha * transmit
     
     rgb = jnp.sum(weights[..., None] * points_rgb, axis=1)
-    depth = jnp.sum(weights * points_z, axis=1, keepdims=True)
+    depth = jnp.sum(weights * points_distance, axis=1, keepdims=True)
     
     acc = jnp.sum(weights, axis=-1, keepdims=True)
-    disp = acc / (depth + EPS)
     if white_bkgd:
         rgb = rgb + (1. - acc)
-    return rgb, disp, acc, weights
+    return rgb, depth, acc, weights

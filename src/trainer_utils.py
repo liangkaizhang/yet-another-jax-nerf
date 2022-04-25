@@ -23,8 +23,13 @@ def weight_decay_l2(parameters: jnp.ndarray):
     return weight_l2
 
 
-def photometric_loss(pred: jnp.ndarray, gd: jnp.ndarray):
-    return jnp.square(pred - gd).mean()
+def mae_loss(pred: jnp.ndarray, gd: jnp.ndarray, weights: jnp.ndarray=1.0):
+    errors = jnp.abs(pred - gd) * weights
+    return errors.mean()
+
+def mse_loss(pred: jnp.ndarray, gd: jnp.ndarray, weights: jnp.ndarray=1.0):
+    errors = jnp.square(pred - gd) * weights
+    return errors.mean()
 
 # def compute_metrics(logits, labels):
 #   loss = cross_entropy_loss(logits, labels)
