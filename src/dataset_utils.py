@@ -35,14 +35,14 @@ def interpolate_bilinear(image: tf.Tensor, query_points: tf.Tensor) -> tf.Tensor
     return values
 
 
-def sample_pixels(image: tf.Tensor, num_samples: int) -> Tuple[tf.Tensor, tf.Tensor]:
+def sample_pixels(image: tf.Tensor, num_samples: int, randomized: bool=True) -> Tuple[tf.Tensor, tf.Tensor]:
     """Random sample `num_samples` pixel values and locations from input image."""
     height, width, _ = image.shape
     assert num_samples <= height * width
 
     image = tf.reshape(image, [-1 ,3])
     idxs = tf.range(tf.shape(image)[0])
-    if num_samples > 0:
+    if randomized:
         ridxs = tf.random.shuffle(idxs)[:num_samples]
     else:
         ridxs = idxs
@@ -50,6 +50,7 @@ def sample_pixels(image: tf.Tensor, num_samples: int) -> Tuple[tf.Tensor, tf.Ten
     locations = tf.unravel_index(
         indices=ridxs, dims=[height, width])
     return colors, tf.transpose(locations)
+
 
 def generate_rays(x: tf.Tensor, y: tf.Tensor, camera: Camera, use_pixel_centers: bool=True) -> Rays:
     """Generate rays emitting from pixel locations."""

@@ -75,8 +75,8 @@ class DatasetBuilder(object):
             num_color_samples = batch_size
 
         def _parser_fn(image_id: tf.Tensor):
-            return tf.py_function(func=self._parse_single_image,
-                                  inp=[image_id, num_color_samples, num_depth_samples],
+            return tf.py_function(func=self._parse_single_example,
+                                  inp=[image_id, num_color_samples, num_depth_samples, is_training],
                                   Tout=[tf.float32, tf.float32, tf.float32, tf.float32, tf.float32])
             
         ds = ds.map(_parser_fn) #, num_parallel_calls=tf.data.experimental.AUTOTUNE)
@@ -91,18 +91,20 @@ class DatasetBuilder(object):
         ds = ds.prefetch(self._config.prefetch_size)
         return ds
 
-    def _parse_single_image(self,
-                            image_id: tf.Tensor,
-                            num_color_samples: int,
-                            num_depth_samples: int):
-        """Parse rays from single image.
+    def _parse_single_example(self,
+                              image_id: tf.Tensor,
+                              num_color_samples: int,
+                              num_depth_samples: int,
+                              is_training: bool=False):
+        """Parse single example from dataset.
 
             Finds values for query points on a grid using bilinear interpolation.
     
         Args:
             image_id: id of the input image.
-            num_color_samples: number of ray samples with color info only.
+            num_color_samples: number of ray samples with color only.
             num_depth_samples: number of ray samples with depth.
+            is_training: whether is training.
 
         Returns:
             origins: ray origins of shape `[num_samples, 3]`.
@@ -118,7 +120,7 @@ class DatasetBuilder(object):
             raise ValueError("Inputs `num_color_samples` or `num_depth_samples` can't be both zeros.")
 
         # Decode image.
-        image_meta =self._images_meta[image_id.numpy()]  # tf.Tensor is unhashable!
+        image_meta = self._images_meta[image_id.numpy()]  # tf.Tensor is unhashable!
         image_filename = os.path.join(self._config.images_dir, image_meta.name)
         image = tf.image.decode_image(tf.io.read_file(image_filename), channels=3)
         if self._config.float_image:
@@ -140,9 +142,9 @@ class DatasetBuilder(object):
         weights = []
 
         # Genrate color rays.
-        if num_color_samples:
+        if num_color_samples != 0:
             origins_c, directions_c, colors_c = self._sample_color_rays(
-                image, camera, num_color_samples)
+                image, camera, num_color_samples, is_training)
             origins.append(origins_c)
             directions.append(directions_c)
             colors.append(colors_c)
@@ -150,7 +152,7 @@ class DatasetBuilder(object):
             weights.append(tf.ones_like(colors_c[..., -1:]) * np.nan)
 
         # Genrate depth rays.
-        if num_depth_samples:
+        if is_training and num_depth_samples:
             # Parse 2D/3D key-points.
             points_2d = image_meta.xys
             points_3d_idx = image_meta.point3D_ids
@@ -177,22 +179,25 @@ class DatasetBuilder(object):
         depths = tf.concat(depths, axis=0)
         weights = tf.concat(weights, axis=0)
 
-        # Random shuffle all results.
-        idxs = tf.range(num_color_samples + num_depth_samples)
-        idxs = tf.random.shuffle(idxs)
-        origins = origins[idxs, :]
-        directions = directions[idxs, :]
-        colors = colors[idxs, :]
-        depths = depths[idxs]
-        weights = weights[idxs]
+        if is_training:
+            # Random shuffle all results.
+            idxs = tf.range(origins.shape[0])
+            idxs = tf.random.shuffle(idxs)
+            origins = origins[idxs, :]
+            directions = directions[idxs, :]
+            colors = colors[idxs, :]
+            depths = depths[idxs]
+            weights = weights[idxs]
+
         return origins, directions, colors, depths, weights
 
-    def _sample_color_rays(self, image, camera, num_samples):
+
+    def _sample_color_rays(self, image, camera, num_samples, randomized=True):
         height, width, _ = image.shape
         if num_samples > height * width:
             raise ValueError("Input `num_samples` exceeds image resolution!")
 
-        colors, locations = dataset_utils.sample_pixels(image, num_samples)
+        colors, locations = dataset_utils.sample_pixels(image, num_samples, randomized)
         x = tf.cast(locations[..., 1], tf.float32)
         y = tf.cast(locations[..., 0], tf.float32)
         rays = dataset_utils.generate_rays(x, y, camera, self._config.use_pixel_centers)

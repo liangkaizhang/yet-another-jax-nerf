@@ -6,8 +6,7 @@ EPS = 1e-10
 
 
 def sample_pdf(rng, bin_start, bin_width, bin_weights, num_samples, randomized=False):
-    bin_weights += EPS
-    pdf = bin_weights / jnp.sum(bin_weights, axis=-1, keepdims=True)
+    pdf = (bin_weights + EPS) / (jnp.sum(bin_weights, axis=-1, keepdims=True) + EPS)
     cdf = jnp.cumsum(pdf, axis=-1)
     cdf = jnp.concatenate([jnp.zeros_like(cdf[..., :1]), cdf], axis=-1)
 
@@ -16,29 +15,29 @@ def sample_pdf(rng, bin_start, bin_width, bin_weights, num_samples, randomized=F
     else:
         uniform_samples = jnp.linspace(0.0, 1.0, num_samples)
 
-    index_higher = jnp.searchsorted(cdf, uniform_samples, side='right')
-    index_lower = jnp.maximum(0, index_higher - 1)
+    index_upper = jnp.searchsorted(cdf, uniform_samples, side='right')
+    index_lower = jnp.maximum(0, index_upper - 1)
 
-    cdf_higher = cdf[index_higher]
+    cdf_upper = cdf[index_upper]
     cdf_lower = cdf[index_lower]
 
-    bin_prob  = cdf_higher - cdf_lower
-    bin_prob = jnp.where(bin_prob < EPS, 1.0, bin_prob)
-    slope = (uniform_samples - cdf_lower) / bin_prob
+    slope = jnp.nan_to_num((uniform_samples - cdf_lower) / (cdf_upper - cdf_lower), 0.0)
+    slope = jnp.clip(slope, 0., 1.)
     
     sampled_values = bin_start[index_lower] + slope * bin_width[index_lower]
-    return jnp.sort(sampled_values)
+    return sampled_values
 
 
-def sample_along_rays(rng: jnp.ndarray, rays: Rays, all_bins, all_weights, num_samples: int, randomized: bool = False) -> jnp.ndarray:
-    
-    def sample_helper(rng, origin, direction, bins, weights):
+def sample_along_rays(rng: jnp.ndarray, rays: Rays, all_bins: jnp.ndarray, all_weights: jnp.ndarray, num_samples: int, randomized: bool = False, combine=False) -> jnp.ndarray:
+    def sample_helper(rng, origins, directions, bins, weights):
         bin_start = bins[..., :-1]
         bin_width = bins[..., 1:] - bins[..., :-1]
-        bin_weights = .5 * (weights[..., 1:] + weights[..., :-1])
+        bin_weights = .5 * (weights[..., :-1] + weights[..., 1:])
         z_samples = sample_pdf(rng, bin_start, bin_width, bin_weights, num_samples, randomized)
-        direction = z_samples[..., None] * direction[None, :]
-        points = origin[None, :] + direction
+        if combine:
+            z_samples = jnp.concatenate([bins, z_samples], axis=-1)
+        z_samples = jnp.sort(z_samples)
+        points = origins[None, :] + z_samples[..., None] * directions[None, :]
         return points, z_samples
 
     num_rays = rays.origins.shape[0]

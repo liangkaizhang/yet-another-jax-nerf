@@ -1,5 +1,7 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"]="1"  # specify which GPU(s) to be used
+
+from matplotlib.pyplot import step
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0"  # specify which GPU(s) to be used
 
 from absl import app
 from absl import flags
@@ -10,15 +12,15 @@ import attr
 import functools
 
 import gin
+import flax
+import optax
 from flax.training import checkpoints
 from flax.training import common_utils
 from flax.training import train_state
-from flax import linen as nn
-from flax import jax_utils
+from flax import jax_utils, struct
 import jax
 import jax.numpy as jnp
 from jax import lax, jit, random
-import optax
 
 from dataset import DatasetConfig, DatasetBuilder
 from nerf import NerfConfig, nerf_builder
@@ -29,18 +31,17 @@ FLAGS = flags.FLAGS
 trainer_utils.define_flags()
 
 
-#@gin.configurable
+@gin.configurable
 @attr.s(frozen=True, auto_attribs=True)
 class OptimizerConfig:
     max_steps: int = int(1e6)
     init_lr: float = 5e-4
     final_lr: float = 5e-6
-    lr_delay_steps: int = 0
-    lr_delay_mult: float = 1.
+    lr_delay_rate: float = 0.1
     weight_decay: float = 1e-3
 
 
-#@gin.configurable
+@gin.configurable
 @attr.s(frozen=True, auto_attribs=True)
 class TrainerConfig:
     train_dir: str = ""
@@ -53,46 +54,32 @@ class Trainer:
     """Class for training NeRF model."""
 
     def __init__(self, config: TrainerConfig):
-        self._config = config
-        self._rng = random.PRNGKey(20200823)
-        self._state = None
+        self.config = config
 
-    def train_and_evaluate(self):
-        # Build dataset.
-        train_iter, eval_iter = self.create_dataset()
-        # Build model and state.
-        self._state, _ = self.create_train_state()
-        # Load from checkpoint.
-
-        # Train loop.
-        self._state = jax_utils.replicate(self._state)
-        p_train_step = self.create_train_step()
-        key, self._rng = random.split(self._rng)
-        keys = random.split(key, 1)
-        for step, rays in zip(range(self._config.max_steps), train_iter):
-            self._state, metrics, keys = p_train_step(keys, self._state, rays)
-            if self.should_log(step):
-                self.write_summary(metrics)
-            if self.should_eval(step):
-                pass
-            
-    def should_log(self, step: int):
-        return True
-
-    def should_eval(self, step: int):
-        return True  
+    def create_train_state(self, rng):
+        model, params = nerf_builder(rng, self.config.model_config)
+        init_lr = self.config.optimizer_config.init_lr
+        max_steps = self.config.optimizer_config.max_steps
+        exponential_decay_scheduler = optax.exponential_decay(
+            init_value=init_lr,
+            transition_steps=max_steps,
+            decay_rate=0.1)
+        tx = optax.adam(learning_rate=exponential_decay_scheduler)
+        state = train_state.TrainState.create(
+            apply_fn=model.apply,
+            params=params,
+            tx=tx)
+        return state
 
     def create_train_step(self):
         return jax.pmap(
-            functools.partial(self._train_step_impl, learning_rate_fn=None),
+            self._train_step_impl,
             axis_name='batch')
 
-    def _train_step_impl(self, rng, state, rays, learning_rate_fn):
+    def _train_step_impl(self, key, state, rays):
         """Perform a single training step."""
-        rng, key = random.split(rng)
-
         def loss_fn(params):
-            coarse_rgb, coarse_depth, fine_rgb, fine_depth = state.apply_fn(params, key, rays)
+            coarse_rgb, _, fine_rgb, fine_depth = state.apply_fn(params, key, rays)
 
             # Compute RGB loss.
             loss_coarse_rgb = trainer_utils.mse_loss(coarse_rgb, rays.colors)
@@ -103,20 +90,16 @@ class Trainer:
             mask = ~jnp.isnan(rays.depths)
             depths_gt = jnp.where(mask, rays.depths, 0.)
             weights_depth = jnp.where(mask, rays.weights, 0.)
-            coarse_depth = jnp.where(mask, coarse_depth, 0.)
-            fine_depth = jnp.where(mask, fine_depth, 0.)
 
             # Compute depth loss.
-            loss_coarse_depth = trainer_utils.mse_loss(coarse_depth, depths_gt, weights_depth)
-            loss_fine_depth = trainer_utils.mse_loss(fine_depth, depths_gt, weights_depth)
-            loss_depth = loss_coarse_depth + loss_fine_depth
+            loss_depth = trainer_utils.mse_loss(fine_depth, depths_gt, weights_depth)
+            loss_depth *= 0.1
         
             # Final loss.
             loss = loss_rgb + loss_depth
             metrics = {"loss_coarse_rgb": loss_coarse_rgb,
                        "loss_fine_rgb": loss_fine_rgb,
-                       "loss_coarse_depth": loss_coarse_depth,
-                       "loss_fine_depth": loss_fine_depth,
+                       "loss_depth": loss_depth,
                        "loss": loss}
 
             # Add weight decay.
@@ -131,10 +114,10 @@ class Trainer:
 
         grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
         (_, metrics), grads = grad_fn(state.params)
-        # Re-use same axis_name as in the call to `pmap(...train_step...)` below.
         grads = lax.pmean(grads, axis_name='batch')
-        new_state = state.apply_gradients(grads=grads)
-        return new_state, metrics, rng
+        metrics = lax.pmean(metrics, axis_name='batch')
+        new_state = state.apply_gradients(grads)
+        return new_state, metrics
 
     def eval_step(self, state, batch):
         pass
@@ -150,7 +133,7 @@ class Trainer:
             rays = Rays(*data)
             return jax.tree_map(_prepare_tf_data, rays)
 
-        ds_builder = DatasetBuilder(self._config.dataset_config)
+        ds_builder = DatasetBuilder(self.config.dataset_config)
         train_ds = ds_builder.build_train_dataset()
         eval_ds = ds_builder.build_test_dataset()
 
@@ -162,17 +145,6 @@ class Trainer:
         if to_device:
             eval_iter = jax_utils.prefetch_to_device(eval_iter, 2)
         return train_iter, eval_iter
-
-    def create_train_state(self):
-        self._rng, key = random.split(self._rng)
-        model, params = nerf_builder(key, self._config.model_config.coarse_module_config)
-        learning_rate_fn = None
-        tx = optax.adam(learning_rate=self._config.optimizer_config.init_lr)
-        state = train_state.TrainState.create(
-            apply_fn=model.apply,
-            params=params,
-            tx=tx)
-        return state
 
     def restore_checkpoint(self):
         return checkpoints.restore_checkpoint(
@@ -189,12 +161,33 @@ class Trainer:
     def write_summary(self, metrics: Dict):
         pass
 
+    def train_and_evaluate(self):
+        rng = random.PRNGKey(20200823)
+        n_local_devices = jax.local_device_count()
+        rng = rng + jax.host_id()  # Make random seed separate across hosts.
+        # Build dataset.
+        train_iter, eval_iter = self.create_dataset()
+        # Build model and state.
+        key, rng = random.split(rng)
+        state = self.create_train_state(key)
+        state = jax_utils.replicate(state)
+        # Load from checkpoint.
 
-def main(unused_argv):
-    gin.parse_config_file(FLAGS.config)
-    trainer = Trainer(TrainerConfig())
-    trainer.train_and_evaluate()
+        # Create train step.
+        p_train_step = self.create_train_step()
 
+        # Train loop.
+        for step, rays in zip(range(self.config.max_steps), train_iter):
+            key, rng = random.split(rng)
+            keys = random.split(key, n_local_devices)
+            state, metrics = p_train_step(keys, state, rays)
+            if self.should_log(step):
+                self.write_summary(metrics)
+            if self.should_eval(step):
+                pass
+            
+    def should_log(self, step: int):
+        return True
 
-if __name__ == "__main__":
-  app.run(main)
+    def should_eval(self, step: int):
+        return True  

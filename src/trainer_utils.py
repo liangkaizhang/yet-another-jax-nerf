@@ -4,6 +4,7 @@ from absl import flags
 import jax.numpy as jnp
 import jax
 from jax import jit, random
+import optax
 
 from geometry import Rays, Camera
 
@@ -31,34 +32,38 @@ def mse_loss(pred: jnp.ndarray, gd: jnp.ndarray, weights: jnp.ndarray=1.0):
     errors = jnp.square(pred - gd) * weights
     return errors.mean()
 
-# def compute_metrics(logits, labels):
-#   loss = cross_entropy_loss(logits, labels)
-#   accuracy = jnp.mean(jnp.argmax(logits, -1) == labels)
-#   metrics = {
-#       'loss': loss,
-#       'accuracy': accuracy,
-#   }
-#   metrics = lax.pmean(metrics, axis_name='batch')
-#   return metrics
-
-
-# def create_learning_rate_fn(
-#     config: ml_collections.ConfigDict,
-#     base_learning_rate: float,
-#     steps_per_epoch: int):
-#   """Create learning rate schedule."""
-#   warmup_fn = optax.linear_schedule(
-#       init_value=0., end_value=base_learning_rate,
-#       transition_steps=config.warmup_epochs * steps_per_epoch)
-#   cosine_epochs = max(config.num_epochs - config.warmup_epochs, 1)
-#   cosine_fn = optax.cosine_decay_schedule(
-#       init_value=base_learning_rate,
-#       decay_steps=cosine_epochs * steps_per_epoch)
-#   schedule_fn = optax.join_schedules(
-#       schedules=[warmup_fn, cosine_fn],
-#       boundaries=[config.warmup_epochs * steps_per_epoch])
-#   return schedule_fn
-
+def learning_rate_decay(step,
+                        lr_init,
+                        lr_final,
+                        max_steps,
+                        lr_delay_steps=0,
+                        lr_delay_mult=1):
+  """Continuous learning rate decay function.
+  The returned rate is lr_init when step=0 and lr_final when step=max_steps, and
+  is log-linearly interpolated elsewhere (equivalent to exponential decay).
+  If lr_delay_steps>0 then the learning rate will be scaled by some smooth
+  function of lr_delay_mult, such that the initial learning rate is
+  lr_init*lr_delay_mult at the beginning of optimization but will be eased back
+  to the normal learning rate when steps>lr_delay_steps.
+  Args:
+    step: int, the current optimization step.
+    lr_init: float, the initial learning rate.
+    lr_final: float, the final learning rate.
+    max_steps: int, the number of steps during optimization.
+    lr_delay_steps: int, the number of steps to delay the full learning rate.
+    lr_delay_mult: float, the multiplier on the rate when delaying it.
+  Returns:
+    lr: the learning for current step 'step'.
+  """
+  if lr_delay_steps > 0:
+    # A kind of reverse cosine decay.
+    delay_rate = lr_delay_mult + (1 - lr_delay_mult) * jnp.sin(
+        0.5 * jnp.pi * jnp.clip(step / lr_delay_steps, 0, 1))
+  else:
+    delay_rate = 1.
+  t = jnp.clip(step / max_steps, 0, 1)
+  log_lerp = jnp.exp(jnp.log(lr_init) * (1 - t) + jnp.log(lr_final) * t)
+  return delay_rate * log_lerp
 
 def render_image(image: jnp.ndarray, camera: Camera):
     pass
